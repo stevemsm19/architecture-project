@@ -1,5 +1,5 @@
-**Fecha/hora:** 9 de julio de 2026, 19:11
-**Herramienta y versión:** Gemini, 3.5 Flash
+**Fecha/hora:** 9 de julio de 2026, 19:11  
+**Herramienta y versión:** Gemini, 3.5 Flash  
 **Prompt:** 
 
 Act as a retail strategy expert. Based on the provided context, help me complete Milestone 0: Understanding the Problem. 
@@ -36,8 +36,8 @@ Constraints for the Content:
 
 ---
 
-**Fecha/hora:** 6 de julio de 2026, 19:32
-**Herramienta y versión:** Gemini, 3.5 Flash
+**Fecha/hora:** 6 de julio de 2026, 19:32  
+**Herramienta y versión:** Gemini, 3.5 Flash  
 **Prompt:** 
 
 Act as a software architecture and business analyst expert. Based on the previous context of UrbanPlanet, help me complete Milestone 1: Identification of Actors, External Entities, and Business Capabilities.
