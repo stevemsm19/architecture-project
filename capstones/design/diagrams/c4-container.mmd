@@ -1,0 +1,62 @@
+C4Container
+title Contenedores del Sistema DAS - Fase 1
+
+Person(estudiante, "Estudiante")
+Person(profesor, "Profesor")
+Person(admin, "Personal Administrativo")
+
+System_Ext(nis, "NIS", "Servicio de Identificacion Nacional. Verificacion asincrona de hasta 2 horas.")
+System_Ext(dispositivo, "Dispositivo DAS", "Dispositivo de captura con buffer local para funcionamiento offline.")
+
+System_Boundary(das, "DAS") {
+
+    Container(mobile, "App Movil DAS", "Cliente movil", "Autorregistro, consulta de estado y asistencia propia.")
+    Container(portal, "Portal Administrativo Web", "Cliente web", "Aprobacion de registros, reportes y estadisticas.")
+
+    Container_Boundary(backend, "Backend DAS - Monolito Modular") {
+
+        Container(middleware, "Middleware de Autenticacion", "Modulo transversal", "Valida sesion y autorizacion antes de enrutar solicitudes.")
+
+        Container(identidad, "Identidad y Credenciales", "Modulo interno", "Gestiona DASID, Insignia DAS, credenciales y revocacion.")
+
+        Container(registro, "Registro y Verificacion", "Modulo interno", "Gestiona autorregistro, verificacion con NIS y aprobacion administrativa.")
+
+        Container(captura, "Captura de Asistencia", "Modulo interno", "Recibe eventos de entrada y salida y gestiona eventos offline.")
+
+        Container(reportes, "Reportes y Analitica", "Modulo interno", "Gestiona consultas de asistencia y estadisticas.")
+
+        Container(notificaciones, "Notificaciones", "Modulo interno", "Gestiona notificaciones por correo y push.")
+    }
+
+    ContainerDb(db, "Almacen de Datos Primario", "Base de datos", "Almacen compartido con esquemas logicos por modulo.")
+}
+
+Rel(estudiante, mobile, "Usa", "HTTPS")
+Rel(profesor, mobile, "Usa", "HTTPS")
+Rel(admin, portal, "Usa", "HTTPS")
+
+Rel(mobile, middleware, "Solicitudes", "HTTPS/JSON")
+Rel(portal, middleware, "Solicitudes", "HTTPS/JSON")
+
+Rel(middleware, identidad, "Valida sesion y rol", "En proceso")
+Rel(middleware, registro, "Autorregistro y aprobacion", "En proceso")
+Rel(middleware, reportes, "Consulta asistencia y reportes", "En proceso")
+
+Rel(dispositivo, captura, "Envia eventos de asistencia", "REST")
+Rel(dispositivo, captura, "Sincroniza datos offline", "REST")
+
+Rel(registro, nis, "Solicita y consulta verificacion", "API asincrona")
+
+Rel(identidad, db, "Lee y escribe")
+Rel(registro, db, "Lee y escribe")
+Rel(captura, db, "Lee y escribe")
+Rel(reportes, db, "Lee")
+Rel(notificaciones, db, "Lee y escribe")
+
+Rel(captura, identidad, "Valida credencial", "En proceso")
+Rel(registro, identidad, "Crea DASID y credencial", "En proceso")
+Rel(captura, reportes, "Actualiza datos de asistencia", "En proceso")
+Rel(registro, notificaciones, "Notifica cambios de estado", "En proceso")
+Rel(identidad, notificaciones, "Notifica revocacion", "En proceso")
+
+UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")

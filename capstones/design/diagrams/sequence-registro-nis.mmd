@@ -1,0 +1,89 @@
+sequenceDiagram
+    actor U as Estudiante/Profesor
+    participant App as App Movil DAS
+    participant Reg as Modulo Registro y Verificacion (Backend DAS - Monolito Modular)
+    participant Saga as Maquina de Estados / Cola de Trabajos Interna
+    participant ACL as Capa Anti-Corrupcion (ACL NIS) - worker de la cola interna
+    participant NIS as NIS (externo)
+    participant Iden as Modulo Identidad y Credenciales (mismo monolito)
+    participant Admin as Personal Administrativo
+    participant Notif as Modulo Notificaciones (mismo monolito)
+
+    Note over App,Notif: Fase 1 (DEC-0013): Registro y Verificacion es un modulo del mismo desplegable,<br/>no un servicio aparte. Las llamadas entre Reg, Saga, Iden y Notif son invocaciones en proceso<br/>(mismo runtime, mismo esquema logico dentro del almacen compartido) - solo la comunicacion<br/>con el NIS (externo) cruza una frontera de red real y sigue siendo asincrona.
+
+    U->>App: Envia documento, foto, datos personales
+    App->>App: Genera Idempotency-Key (UUID, persistida durante el intento de envio, ADR-0012)
+    App->>Reg: POST /registrations (header Idempotency-Key) (REQ-02)
+
+    alt Ya existe SolicitudDeRegistro con esa Idempotency-Key (reenvio/timeout del cliente, ADR-0012)
+        Reg-->>App: 200 OK (registroId existente - no crea una nueva Saga)
+    else Primer envio con esa Idempotency-Key
+        Reg->>Saga: Inicia maquina de estados (registroId, idempotencyKey)
+        Saga->>Saga: estado = pendiente_nis, intentosNIS = 0
+        Reg-->>App: 202 Aceptado (registroId, estado=pendiente_nis)
+
+        Saga->>ACL: Encola job de verificacion de identidad
+        ACL->>NIS: Envia solicitud de verificacion (REQ-03)
+        NIS-->>ACL: Acuse de recibo (solicitud aceptada, no es el resultado)
+        Note over Saga,NIS: Modelo de entrega = polling con backoff, no push/callback asumido (ADR-0007).<br/>El polling lo ejecuta un worker de la cola de trabajos interna del modulo (Fase 1),<br/>no un servicio Registro y Verificacion desplegado aparte.<br/>Usuario en estado PENDIENTE_NIS, consultable en cualquier momento via<br/>GET /registrations/{id}/status (ASM-08)
+
+        loop Hasta 3 ciclos de polling con backoff (consultas cada 5-30 min, hasta 2h por ciclo - RST-02, ADR-0007)
+            ACL->>NIS: GET estado de verificacion (polling)
+            alt NIS devuelve un resultado disponible
+                NIS-->>ACL: Resultado de verificacion + nisVerificationId
+                ACL->>Saga: Traduce resultado al modelo interno
+                Saga->>Saga: Compara nisVerificationId contra el ya almacenado (Idempotent Consumer, ADR-0007)
+                alt Primer resultado recibido para esta solicitud
+                    Saga->>Saga: Almacena nisVerificationId&#59; sale del ciclo de polling con el resultado obtenido
+                else Resultado duplicado (mismo nisVerificationId, reenvio de red)
+                    Saga->>Saga: Descarta el resultado&#59; registra en log de auditoria (no reprocesa)
+                else Resultado contradictorio (nisVerificationId distinto) llegado tras un estado ya terminal
+                    ACL->>Notif: Encola tarea de revision manual (logica Dead Letter, en proceso, sin infraestructura separada, ADR-0007)
+                    Notif-->>Admin: Notifica resultado tardio contradictorio - decision manual<br/>(incluye posible revocacion de credencial via ADR-0009 revisado)
+                end
+            else NIS aun no tiene resultado disponible (timeout de este ciclo)
+                Note over ACL,NIS: Timeout de ciclo, hasta 2h (RST-02)
+                ACL->>Saga: Notifica timeout de ciclo
+                Saga->>Saga: intentosNIS += 1, estado = nis_timeout
+                Saga->>Notif: Invoca notificacion de timeout de ciclo (en proceso&#59; antes: evento NISVerificationTimedOut via broker)
+                Notif-->>Admin: Alerta de timeout de ciclo (ASM-15)
+                Notif-->>U: Notificacion de demora (la solicitud permanece pendiente)
+                opt intentosNIS < 3
+                    Saga->>Saga: estado = pendiente_nis (reintenta con backoff exponencial + jitter, ADR-0002)
+                end
+            end
+        end
+
+        alt Tope de 3 ciclos alcanzado sin resultado (intentosNIS = 3)
+            Saga->>Saga: estado = escalado_manual (terminal, ADR-0007)
+            Saga->>Notif: Invoca notificacion de escalamiento manual (en proceso&#59; antes: evento NISVerificationEscalated via broker)
+            Notif-->>Admin: Alerta de escalamiento manual - requiere intervencion directa (ej. contacto con el NIS)
+            Notif-->>U: Notifica demora extendida&#59; solicitud escalada a revision manual
+        else Verificacion aprobada por el NIS (resultado obtenido dentro del tope)
+            Saga->>Saga: estado = nis_verificado -> pendiente_admin
+            Note over Reg,Admin: Solicitud visible de inmediato en GET /registrations/pending<br/>(consulta directa sobre el esquema registro, ASM-14, multi-campus)
+            Admin->>Reg: POST /registrations/{id}/admin-decision
+            Reg->>Saga: Registra decision administrativa
+            alt Personal administrativo aprueba
+                Saga->>Saga: estado = aprobado
+                Saga->>Iden: Invoca creacion de DASID + Credencial (en proceso&#59; antes: evento RegistrationApproved via broker)
+                Iden->>Iden: Crea DASID (estado=activo) + Credencial
+                Iden->>Notif: Invoca notificacion de emision de Insignia (en proceso&#59; antes: evento CredentialIssued via broker)
+                Notif-->>U: Notifica emision de Insignia DAS
+            else Personal administrativo rechaza
+                Saga->>Saga: estado = rechazado (con motivo, ASM-11)
+                Saga->>Notif: Invoca notificacion de rechazo con motivo (en proceso&#59; antes: evento RegistrationRejected via broker)
+                Notif-->>U: Notifica rechazo con motivo (ASM-11)
+            end
+        else Verificacion rechazada por el NIS (resultado obtenido dentro del tope)
+            Saga->>Saga: estado = nis_rechazado -> rechazado
+            Saga->>Notif: Invoca notificacion de rechazo con motivo (en proceso)
+            Notif-->>U: Notifica rechazo con motivo
+        end
+    end
+
+    opt Consulta de estado en cualquier momento durante la espera
+        U->>App: Consulta estado
+        App->>Reg: GET /registrations/{id}/status
+        Reg-->>App: Estado actual, incluye escalado_manual si corresponde (ASM-08, ADR-0007)
+    end

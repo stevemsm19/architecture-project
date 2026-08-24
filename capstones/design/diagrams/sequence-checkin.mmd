@@ -1,0 +1,49 @@
+sequenceDiagram
+    actor U as Estudiante/Profesor
+    participant Disp as Dispositivo DAS
+    participant Cap as Modulo Captura de Asistencia (Backend DAS - Monolito Modular)
+    participant Iden as Modulo Identidad y Credenciales (mismo monolito)
+    participant Rep as Modulo Reportes y Analitica (mismo monolito)
+    actor Prof as Profesor
+
+    Note over Cap,Rep: Fase 1 (DEC-0013): Captura de Asistencia, Identidad y Credenciales y Reportes y Analitica<br/>son modulos del mismo desplegable. La validacion de credencial y la actualizacion de la<br/>replica de lectura de Reportes son invocaciones en proceso, sin frontera de red -<br/>por eso no existe Circuit Breaker Captura-Identidad en Fase 1 (ADR-0006 en pausa).<br/>El Dispositivo DAS SI sigue siendo un actor externo real, con su propio buffer offline (ADR-0005, sin cambios).
+
+    U->>Disp: Escanea Insignia DAS (entrada/salida)
+
+    alt Dispositivo con conectividad (camino feliz)
+        Disp->>Cap: POST /attendance-events (dasId, campusId, dispositivoId, timestamp, direccion, claveIdempotencia)
+        Cap->>Iden: Valida credencial
+        Note over Cap,Iden: Invocacion en proceso, sin frontera de red que proteger (ADR-0006 en pausa en Fase 1, DEC-0013).<br/>No hay Circuit Breaker ni caché local de "recientemente validadas" que sincronizar en esta rama.
+        Iden-->>Cap: Credencial valida (o revocada, ADR-0009 revisado: fuente unica de verdad)
+        Cap->>Cap: Valida idempotencia (dispositivoId+direccion+timestamp) y escribe EventoDeAsistencia<br/>(modoCaptura=online) en el esquema captura, capa caliente (retencion por capas dentro del mismo motor, ADR-0004 revisado)
+        Cap-->>Disp: 201 Registrado
+        Cap->>Rep: Actualiza la replica de lectura / vista materializada de asistencia
+        Note over Cap,Rep: En proceso o mecanismo interno del motor de base de datos (antes: evento AttendanceRecorded<br/>via broker, ADR-0003 revisado). La meta de <=15s p95 (ADR-0003) se mantiene sin broker distribuido.
+
+    else Dispositivo sin conectividad (ASM-07)
+        Disp->>Disp: Valida credencial contra cache local del dispositivo (sin llamada sincrona)
+        Disp->>Disp: Encola el evento en buffer local (modoCaptura=offline_retroactivo)
+        Note over Disp: Evento pendiente de sincronizacion mientras dure la desconexion (ADR-0005, sin cambios en Fase 1)
+        opt Recupera conectividad
+            Disp->>Cap: POST /attendance-events/batch (eventos bufferizados, cada uno con claveIdempotencia)
+            Cap->>Cap: Valida idempotencia por evento (evita duplicados por reintento de red)
+            Cap->>Cap: Escribe EventoDeAsistencia (modoCaptura=offline_retroactivo)
+            Cap-->>Disp: 201 Sincronizado
+            Cap->>Rep: Actualiza la replica de lectura / vista materializada (marca de sincronizacion retroactiva)
+        end
+    end
+
+    opt Dispositivo DAS no funciona - registro manual del profesor (ASM-07)
+        Prof->>Cap: POST /attendance-events (registro manual, mismo contrato de idempotencia)
+        Cap->>Cap: Valida idempotencia y escribe EventoDeAsistencia (modoCaptura=offline_retroactivo)
+        Cap->>Rep: Actualiza la replica de lectura / vista materializada
+    end
+
+    opt Refresco periodico de la cache local del dispositivo (cada ~15 min, ADR-0008 en pausa en Fase 1)
+        Disp->>Cap: GET /attendance-devices/{dispositivoId}/credential-cache?since=<ts>
+        Cap->>Iden: Lee credenciales vigentes/revocadas del campus
+        Note over Cap,Iden: Consulta directa de lectura en el mismo proceso, sobre el esquema compartido<br/>(ADR-0008 en pausa en Fase 1: sin proyeccion local por eventos ni snapshot en lote -<br/>ese mecanismo vuelve a ser necesario recien en Fase 2, si Captura se extrae).
+        Iden-->>Cap: Estado vigente de credenciales del campus (incluye revocaciones, ADR-0009 revisado)
+        Cap-->>Disp: Delta de credenciales validas para el campus
+        Note over Disp,Cap: El Dispositivo DAS nunca llama directamente a Identidad y Credenciales -<br/>ese contrato de "quien llama a quien" (ADR-0008) no cambia en Fase 1.
+    end

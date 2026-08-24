@@ -1,0 +1,46 @@
+C4Component
+    title Componentes - Modulo Registro y Verificacion (dentro del Backend DAS, Monolito Modular - Fase 1, DEC-0013/DEC-0014)
+
+    Person(usuario, "Estudiante/Profesor", "Se autorregistra, consulta estado")
+    Person(admin, "Personal Administrativo", "Aprueba/rechaza, ve motivo/estado, atiende escalamientos manuales (ASM-10, ASM-11, ASM-14, ADR-0007)")
+
+    Container(mobile, "App Movil DAS", "Cliente movil", "Origen de solicitudes de autorregistro (con Idempotency-Key, ADR-0012) y consulta de estado. Pasa por el Middleware de Autenticacion (ADR-0014) antes de llegar al modulo; sin BFF ni API Gateway multi-servicio en Fase 1")
+    Container(portal, "Portal Administrativo Web", "Cliente web", "Origen de la cola de revision y decisiones administrativas. Pasa por el Middleware de Autenticacion (ADR-0014) antes de llegar al modulo; sin BFF ni API Gateway multi-servicio en Fase 1")
+    Container(middleware, "Middleware de Autenticacion (Modulo de Seguridad transversal)", "Interceptor AOP, container vecino dentro del mismo monolito (ADR-0014). No pertenece a este modulo, no es un bounded context", "Valida la sesion/token emitida por Identidad y Credenciales (POST /identity/sessions) y aplica autorizacion por rol antes de enrutar; en particular restringe POST /registrations/{id}/admin-decision al rol Personal Administrativo. Rechaza 401/403 antes de que la solicitud llegue a las APIs de este modulo")
+    System_Ext(nis, "NIS", "Servicio de Identificacion Nacional. Expone consulta de estado (polling); modelo de entrega = polling con backoff, hasta 2h por ciclo (RST-02, ASM-01, ADR-0007). Externo independientemente de la topologia interna del backend")
+    Container(mod_identidad, "Modulo: Identidad y Credenciales", "Modulo interno del mismo monolito", "Recibe la invocacion en proceso para crear DASID/Credencial tras una aprobacion (antes: evento RegistrationApproved via broker). Desde ADR-0014, tambien emite y valida la sesion/token de aplicacion que consulta el Middleware de Autenticacion")
+    Container(mod_notif, "Modulo: Notificaciones", "Modulo interno del mismo monolito", "Recibe invocaciones en proceso o jobs de la cola de trabajos interna para notificar estado, timeout, escalamiento y revision manual")
+    ContainerDb(db, "Almacen de Datos Primario (esquema registro)", "Esquema logico dentro del motor de base de datos compartido (DEC-0013)", "Agregado SolicitudDeRegistro, incluye idempotencyKey (ADR-0012), nisVerificationId e intentosNIS (ADR-0007). Ningun otro modulo escribe sobre este esquema")
+
+    Container_Boundary(registro, "Modulo Registro y Verificacion") {
+        Component(api_autorregistro, "API de Autorregistro", "REST", "POST /registrations - recibe documento, foto, datos personales (REQ-02); deduplica por header Idempotency-Key, devuelve registroId existente en reenvios (ADR-0012)")
+        Component(api_estado, "API de Estado", "REST", "GET /registrations/{id}/status - visibilidad de estado explicita (ASM-08), incluye el estado terminal escalado_manual (ADR-0007)")
+        Component(api_admin, "API de Revision Administrativa", "REST", "GET /registrations/pending, POST /registrations/{id}/admin-decision (ASM-10, ASM-11, ASM-14). Restringida al rol Personal Administrativo, aplicado por el Middleware de Autenticacion transversal (ADR-0014) antes de llegar aqui - este componente no reimplementa esa validacion")
+        Component(maquina_estados, "Maquina de Estados / Cola de Trabajos Interna (UserRegistrationSaga)", "In-process job queue + state machine (ADR-0002/ADR-0007 revisados, Fase 1)", "Mantiene el mismo patron conceptual de Proceso de Larga Duracion explicito, comprobable, recuperable e idempotente que definia ADR-0002; ya no requiere un motor de flujo de trabajo dedicado como infraestructura separada. Estados: pendiente_nis -> (hasta 3 ciclos de timeout) -> nis_verificado | nis_rechazado -> pendiente_admin -> aprobado | rechazado; tras el 3er timeout -> escalado_manual (terminal). Persiste su estado en el esquema registro del almacen compartido")
+        Component(acl, "Capa Anti-Corrupcion (ACL NIS)", "Adaptador, ejecutado por un worker de la cola de trabajos interna", "Traduce el contrato externo del NIS al modelo interno de la maquina de estados. Modelo de entrega = polling con backoff como mecanismo primario (intervalo 5-30 min, callback opcional solo como acelerador, nunca fuente de verdad por si solo, ADR-0007); implementa Idempotent Consumer sobre resultados entrantes via nisVerificationId y enruta resultados contradictorios tardios a revision manual (Dead Letter logica, sin infraestructura separada en Fase 1)")
+        Component(publicador, "Despachador de Eventos de Dominio (in-process)", "Adaptador de salida", "Invoca en proceso a los modulos consumidores (Identidad y Credenciales, Notificaciones) o encola un job interno para el efecto correspondiente en cada transicion de estado, incluida escalado_manual - reemplaza, en Fase 1, la publicacion a un broker de eventos distribuido (DEC-0013)")
+    }
+
+    Rel(usuario, mobile, "Envia documento, foto, datos", "HTTPS")
+    Rel(mobile, middleware, "Autorregistro (Idempotency-Key), consulta estado", "sync, REST, ADR-0014")
+    Rel(admin, portal, "Revisa y decide, atiende escalamientos", "HTTPS")
+    Rel(portal, middleware, "Cola de revision, aprobar/rechazar", "sync, REST, ADR-0014")
+
+    Rel(middleware, api_autorregistro, "Enruta tras validar sesion", "invocacion en proceso, sync")
+    Rel(middleware, api_estado, "Enruta tras validar sesion", "invocacion en proceso, sync")
+    Rel(middleware, api_admin, "Enruta tras validar sesion y rol Personal Administrativo", "invocacion en proceso, sync, ADR-0014")
+    Rel(middleware, mod_identidad, "Valida sesion/token contra el agregado Credencial (POST /identity/sessions en login)", "invocacion en proceso, sync, ADR-0014")
+
+    Rel(api_autorregistro, maquina_estados, "Inicia el proceso de larga duracion (o retorna registroId existente si la Idempotency-Key ya fue vista)", "invocacion en proceso")
+    Rel(api_estado, maquina_estados, "Consulta estado actual", "invocacion en proceso")
+    Rel(api_admin, maquina_estados, "Registra decision administrativa", "invocacion en proceso")
+
+    Rel(maquina_estados, acl, "Encola/despacha job de verificacion", "invocacion en proceso / cola de trabajos interna")
+    Rel(acl, nis, "Envia solicitud inicial y realiza consultas periodicas de estado (polling con backoff)", "API externa, asincrona, hasta 2h por ciclo, ADR-0007")
+    Rel(acl, maquina_estados, "Entrega resultado de verificacion (con nisVerificationId) o senal de timeout de ciclo", "invocacion en proceso, Idempotent Consumer, ADR-0007")
+    Rel(acl, publicador, "Enruta resultado contradictorio tardio (nisVerificationId distinto tras estado terminal) a cola de revision manual", "invocacion en proceso, logica Dead Letter, ADR-0007")
+
+    Rel(maquina_estados, db, "Lee/escribe estado de SolicitudDeRegistro", "sync, esquema logico registro")
+    Rel(maquina_estados, publicador, "Emite eventos de dominio en cada transicion de estado, incluida escalado_manual", "invocacion en proceso")
+    Rel(publicador, mod_identidad, "Invoca creacion de DASID/Credencial al aprobar (antes: evento RegistrationApproved via broker)", "invocacion en proceso")
+    Rel(publicador, mod_notif, "Invoca notificacion de estado, timeout, escalamiento, aprobacion/rechazo, revision manual", "invocacion en proceso o job de la cola de trabajos interna")

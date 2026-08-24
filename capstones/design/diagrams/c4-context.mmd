@@ -1,0 +1,17 @@
+C4Context
+    title Contexto del Sistema DAS - UPCA (MSA + EDA por Bounded Context)
+
+    Person(estudiante, "Estudiante", "Se autorregistra, consulta su propio estado de asistencia")
+    Person(profesor, "Profesor", "Se autorregistra, consulta su asistencia, registra asistencia manual si el dispositivo DAS falla (ASM-07)")
+    Person(admin, "Personal Administrativo", "Aprueba/rechaza registros, consulta reportes y estadísticas multi-campus")
+
+    System(das, "DAS", "Sistema Digital de Asistencia de UPCA - identidad, registro/verificación, captura de asistencia, reportes, notificaciones")
+
+    System_Ext(nis, "NIS", "Servicio de Identificación Nacional. Verificación de identidad asíncrona, hasta 2 horas de latencia (RST-02). Fuera del control de UPCA (ASM-01)")
+    System_Ext(dispositivo, "Dispositivo DAS de captura", "Escanea la Insignia DAS en cada campus para registrar entrada/salida. Mantiene buffer local ante pérdida de conectividad (ADR-0005)")
+
+    Rel(estudiante, das, "Se autorregistra, consulta asistencia", "HTTPS")
+    Rel(profesor, das, "Se autorregistra, consulta asistencia, registra asistencia manual", "HTTPS")
+    Rel(admin, das, "Aprueba/rechaza registros, ve reportes", "HTTPS")
+    Rel(das, nis, "Solicita verificación de identidad", "API externa, asíncrona, hasta 2h")
+    Rel(dispositivo, das, "Envía eventos de check-in/check-out (online y sincronización batch offline)", "API, idempotente")

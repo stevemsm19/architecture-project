@@ -1,0 +1,29 @@
+sequenceDiagram
+    actor Admin as Personal Administrativo
+    participant Portal as Portal Administrativo Web
+    participant Iden as Modulo Identidad y Credenciales (Backend DAS - Monolito Modular)
+    participant Notif as Modulo Notificaciones (mismo monolito)
+    participant Cap as Modulo Captura de Asistencia (mismo monolito)
+    participant Disp as Dispositivo DAS
+    actor U as Estudiante/Profesor afectado
+
+    Note over Iden,Cap: Fase 1 (DEC-0013): una unica fuente de verdad (DASID.estado) dentro del mismo esquema<br/>logico compartido. Ya no hay tres caches distribuidas que sincronizar (backend de Identidad,<br/>cache "recientemente validadas" de Captura via ADR-0006 -en pausa-, cache del backend via<br/>proyeccion ADR-0008 -en pausa-): cualquier lectura posterior consulta DASID.estado directamente.
+
+    Admin->>Portal: Revoca credencial (motivo: baja / insignia perdida-robada / expulsion)
+    Portal->>Iden: POST /identity/{dasId}/revoke (motivo)
+    Iden->>Iden: DASID.estado = revocado (consistencia inmediata, fuente unica de verdad, ADR-0009 revisado)
+    Iden-->>Portal: 200 OK
+    Iden->>Notif: Invoca notificacion de revocacion (en proceso; antes: evento CredentialRevoked via broker)
+    Notif-->>U: Notifica revocacion de credencial (motivo)
+
+    Note over Iden: Ya no es necesario invalidar activamente una cache separada en Captura de Asistencia<br/>(ADR-0006 en pausa en Fase 1): la siguiente vez que Captura valide este dasId en proceso<br/>(ver sequence-checkin.mmd), lee DASID.estado ya actualizado directamente - sin ventana de<br/>propagacion adicional por ese camino.
+
+    opt Proximo ciclo de sincronizacion del dispositivo (hasta 15 min despues de la revocacion, ADR-0005 sin cambios)
+        Disp->>Cap: GET /attendance-devices/{dispositivoId}/credential-cache?since=<ts>
+        Cap->>Iden: Lee estado vigente de credenciales del campus (consulta directa en proceso, ADR-0008 en pausa en Fase 1)
+        Iden-->>Cap: Incluye la revocacion de dasId (ya reflejada, consistencia inmediata)
+        Cap-->>Disp: Delta de credenciales incluye la revocacion de dasId
+        Disp->>Disp: Purga dasId de su cache local de credenciales validas
+    end
+
+    Note over Iden,Disp: Ventana de exposicion del peor caso en Fase 1: hasta 15 min (TTL, ADR-0009 revisado),<br/>acotada exclusivamente al ciclo de sincronizacion del propio Dispositivo DAS (ADR-0005).<br/>Ya no existe la ventana adicional que en el diseno de microservicios aportaban el Circuit<br/>Breaker de Captura (ADR-0006, en pausa) ni una cache de backend de Identidad separada -<br/>en Fase 1 hay una unica fuente de verdad leida por consulta directa.
